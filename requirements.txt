@@ -1,0 +1,6 @@
+flask
+flask-cors
+ccxt
+pandas
+pandas_ta
+python-telegram-bot
