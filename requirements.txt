@@ -1,6 +1,3 @@
 ccxt
 requests
 flask
-matplotlib
-mplfinance
-pandas
