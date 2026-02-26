@@ -1,65 +1,73 @@
 import asyncio
 import ccxt.async_support as ccxt
 from flask import Flask, jsonify
-from flask_cors import CORS  # PHẢI CÓ DÒNG NÀY
+from flask_cors import CORS
 from threading import Thread
 import requests
 import time
 
 app = Flask(__name__)
-CORS(app)  # PHẢI CÓ DÒNG NÀY ĐỂ SỬA LỖI "ĐANG CHỜ API"
+CORS(app) # Cho phép index.html kết nối
 
-# Cấu hình của bạn
-TELEGRAM_TOKEN = "8732938098:AAGrT0VC6B1mCMKPzdthChMUfGr2dv8tuZ0"
-TELEGRAM_CHAT_ID = "6317501489"
-SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'PAXG/USDT']
+# Cấu hình Telegram của bạn
+TOKEN = "8732938098:AAGrT0VC6B1mCMKPzdthChMUfGr2dv8tuZ0"
+CHAT_ID = "6317501489"
+# Danh sách coin hot rút gọn để tránh quá tải
+SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'PAXG/USDT', 'BNB/USDT', 'DOGE/USDT']
 
-latest_signals = {}
+data_store = {}
 
-def send_tele(msg):
+def alert_tele(msg):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
     except: pass
 
-async def analyze(symbol, exchange):
+async def get_signal(symbol, ex):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
+        ohlcv = await ex.fetch_ohlcv(symbol, timeframe='1h', limit=30)
         closes = [x[4] for x in ohlcv]
-        # RSI đơn giản
-        avg_gain = sum([max(0, closes[i] - closes[i-1]) for i in range(1, 15)]) / 14
-        avg_loss = sum([max(0, closes[i-1] - closes[i]) for i in range(1, 15)]) / 14
-        rs = avg_gain / avg_loss if avg_loss != 0 else 0
+        # RSI 14 đơn giản
+        diff = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        gain = sum([d for d in diff[-14:] if d > 0]) / 14
+        loss = sum([-d for d in diff[-14:] if d < 0]) / 14
+        rs = gain / loss if loss != 0 else 0
         rsi = round(100 - (100 / (1 + rs)), 2)
         
         signal = "WAIT"
         if rsi <= 30: signal = "LONG"
         elif rsi >= 70: signal = "SHORT"
         
-        return {"symbol": symbol, "price": closes[-1], "rsi": rsi, "signal": signal}
+        res = {"symbol": symbol, "price": closes[-1], "rsi": rsi, "signal": signal}
+        
+        # Báo Telegram nếu có kèo mới
+        old_sig = data_store.get(symbol, {}).get('signal', 'WAIT')
+        if signal != "WAIT" and signal != old_sig:
+            alert_tele(f"🔥 *{signal} SIGNAL*: {symbol}\n💰 Giá: `{closes[-1]}`\n📊 RSI: `{rsi}`")
+            
+        return res
     except: return None
 
-async def worker():
-    ex = ccxt.binance({'enableRateLimit': True})
+async def main_loop():
+    ex = ccxt.binance()
     while True:
-        tasks = [analyze(s, ex) for s in SYMBOLS]
+        tasks = [get_signal(s, ex) for s in SYMBOLS]
         results = await asyncio.gather(*tasks)
         for r in results:
-            if r: 
-                if r['signal'] != "WAIT" and latest_signals.get(r['symbol'], {}).get('signal') != r['signal']:
-                    send_tele(f"🚨 *{r['signal']} SIGNAL*: {r['symbol']}\nGiá: `{r['price']}` | RSI: `{r['rsi']}`")
-                latest_signals[r['symbol']] = r
+            if r: data_store[r['symbol']] = r
         await asyncio.sleep(20)
 
 @app.route('/api/signals')
-def get_signals():
-    # Thêm header thủ công để chắc chắn không bị chặn
-    response = jsonify(list(latest_signals.values()))
-    return response
+def api():
+    return jsonify(list(data_store.values()))
 
 @app.route('/')
-def home(): return "API IS LIVE", 200
+def home():
+    return "BOT IS RUNNING", 200
 
 if __name__ == "__main__":
-    Thread(target=lambda: app.run(host='0.0.0.0', port=5000)).start()
-    asyncio.run(worker())
+    # Chạy quét coin trong một luồng riêng
+    t = Thread(target=lambda: asyncio.run(main_loop()))
+    t.start()
+    # Chạy Web Server
+    app.run(host='0.0.0.0', port=5000)
