@@ -3,65 +3,70 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Signal Pro Dashboard</title>
+    <title>Signal Pro Live</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body { background-color: #0b0e11; color: #eaecef; font-family: sans-serif; }
-        .card { background: #1e2329; border: 1px solid #2b3139; border-radius: 12px; cursor: pointer; transition: 0.3s; }
-        .active-card { border: 2px solid #f0b90b !important; }
-        .LONG { color: #2ebd85; } .SHORT { color: #f6465d; }
+        .card { background: #1e2329; border: 1px solid #2b3139; transition: 0.2s; cursor: pointer; border-radius: 10px; }
+        .card:hover { border-color: #f0b90b; }
+        .active-card { border: 2px solid #f0b90b !important; background: #2b3139; }
+        .LONG { border-left: 4px solid #2ebd85; color: #2ebd85; }
+        .SHORT { border-left: 4px solid #f6465d; color: #f6465d; }
     </style>
 </head>
 <body class="p-4">
-    <div class="max-w-5xl mx-auto">
+    <div class="max-w-4xl mx-auto">
         <div class="flex justify-between items-center mb-4">
-            <h1 class="text-xl font-black text-[#f0b90b]">PRO SIGNAL DASHBOARD</h1>
-            <div id="status" class="text-[10px] text-slate-500 font-mono italic">Đang cập nhật...</div>
+            <h1 class="text-xl font-bold text-[#f0b90b]">PRO SIGNAL DASHBOARD</h1>
+            <div id="status" class="text-[10px] bg-red-900/30 px-2 py-1 rounded">Đang kết nối...</div>
         </div>
 
-        <div id="chart-container" class="w-full h-[400px] bg-[#161a1e] rounded-xl border border-slate-800 mb-6 overflow-hidden relative">
-            <div id="label" class="absolute top-4 left-4 z-10 font-bold bg-black/40 p-2 rounded">
-                <span id="curSym">BTC/USDT</span> <span id="curPrice" class="text-yellow-400 ml-2">---</span>
+        <div class="bg-[#161a1e] rounded-xl border border-slate-800 p-2 mb-6 relative">
+            <div id="chart-info" class="absolute top-4 left-4 z-10 flex gap-4 font-bold">
+                <span id="symText">BTC/USDT</span> <span id="priceText" class="text-yellow-400">---</span>
             </div>
-            <div id="chart" class="w-full h-full"></div>
+            <div id="chart" style="height: 380px;"></div>
         </div>
 
-        <div id="grid" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+        <div id="grid" class="grid grid-cols-2 md:grid-cols-4 gap-3"></div>
     </div>
 
     <script>
-        const API = "https://myminiapp-oawx.onrender.com"; // Thay bằng link Render của bạn
-        let chart, candleSeries, curSym = "BTC/USDT";
+        // CẦN THAY LINK NÀY THÀNH LINK RENDER CỦA BẠN
+        const API = "https://myminiapp-oawx.onrender.com";
+        let chart, candleSeries, currentSym = "BTC/USDT";
 
         function initChart() {
-            chart = LightweightCharts.createChart(document.getElementById('chart'), {
+            const chartDom = document.getElementById('chart');
+            chart = LightweightCharts.createChart(chartDom, {
                 layout: { background: { color: '#161a1e' }, textColor: '#d1d4dc' },
                 grid: { vertLines: { color: '#2b3139' }, horzLines: { color: '#2b3139' } },
-                timeScale: { timeVisible: true }
+                timeScale: { borderColor: '#334155' }
             });
             candleSeries = chart.addCandlestickSeries({ upColor: '#2ebd85', downColor: '#f6465d' });
+            window.addEventListener('resize', () => chart.applyOptions({ width: chartDom.clientWidth }));
         }
 
-        async function switchCoin(symbol) {
-            curSym = symbol;
-            document.getElementById('curSym').innerText = symbol === 'PAXG/USDT' ? 'GOLD/Vàng' : symbol;
+        async function loadChart(symbol) {
+            currentSym = symbol;
+            document.getElementById('symText').innerText = symbol === 'PAXG/USDT' ? 'VÀNG (Gold)' : symbol;
             try {
                 const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol.replace('/', '')}&interval=1h&limit=100`);
-                const raw = await res.json();
-                const data = raw.map(d => ({
+                const data = await res.json();
+                const ohlc = data.map(d => ({
                     time: d[0]/1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4])
                 }));
-                candleSeries.setData(data);
+                candleSeries.setData(ohlc);
 
-                // Chèn tín hiệu LONG/SHORT vào nến cuối
+                // Lấy tín hiệu từ API Render của bạn
                 const sigRes = await fetch(`${API}/api/signals`);
                 const signals = await sigRes.json();
                 const mySig = signals.find(s => s.symbol === symbol);
-                
+
                 if (mySig && mySig.signal !== "WAIT") {
                     candleSeries.setMarkers([{
-                        time: data[data.length - 1].time,
+                        time: ohlc[ohlc.length-1].time,
                         position: mySig.signal === 'LONG' ? 'belowBar' : 'aboveBar',
                         color: mySig.signal === 'LONG' ? '#2ebd85' : '#f6465d',
                         shape: mySig.signal === 'LONG' ? 'arrowUp' : 'arrowDown',
@@ -69,36 +74,45 @@
                     }]);
                 } else { candleSeries.setMarkers([]); }
                 chart.timeScale().fitContent();
-            } catch (e) {}
+            } catch (e) { console.error("Lỗi Chart:", e); }
         }
 
-        async function updateGrid() {
+        async function refreshData() {
             try {
                 const res = await fetch(`${API}/api/signals`);
+                if (!res.ok) throw new Error();
                 const data = await res.json();
+                
                 const grid = document.getElementById('grid');
                 grid.innerHTML = '';
-
+                
                 data.forEach(item => {
-                    if (item.symbol === curSym) document.getElementById('curPrice').innerText = item.price;
+                    if (item.symbol === currentSym) document.getElementById('priceText').innerText = item.price;
                     const card = document.createElement('div');
-                    card.className = `card p-4 ${item.signal} ${item.symbol === curSym ? 'active-card' : ''}`;
-                    card.onclick = () => switchCoin(item.symbol);
+                    card.className = `card p-3 ${item.signal} ${item.symbol === currentSym ? 'active-card' : ''}`;
+                    card.onclick = () => loadChart(item.symbol);
                     card.innerHTML = `
-                        <div class="font-bold text-xs uppercase">${item.symbol === 'PAXG/USDT' ? 'Gold' : item.symbol.split('/')[0]}</div>
-                        <div class="text-lg font-mono">${item.price}</div>
-                        <div class="text-[10px] font-black italic mt-1 uppercase">${item.signal}</div>
+                        <div class="flex justify-between font-bold text-xs">
+                            <span>${item.symbol.split('/')[0]}</span>
+                            <span class="opacity-50">${item.rsi}</span>
+                        </div>
+                        <div class="text-sm font-mono mt-1">${item.price}</div>
+                        <div class="text-[9px] font-black italic mt-1">${item.signal}</div>
                     `;
                     grid.appendChild(card);
                 });
                 document.getElementById('status').innerText = "LIVE: " + new Date().toLocaleTimeString();
-            } catch (e) {}
+                document.getElementById('status').className = "text-[10px] bg-green-900/30 px-2 py-1 rounded text-green-400";
+            } catch (e) {
+                document.getElementById('status').innerText = "LỖI KẾT NỐI API";
+                document.getElementById('status').className = "text-[10px] bg-red-900/30 px-2 py-1 rounded text-red-400";
+            }
         }
 
         initChart();
-        switchCoin("BTC/USDT");
-        setInterval(updateGrid, 10000);
-        updateGrid();
+        loadChart("BTC/USDT");
+        setInterval(refreshData, 10000);
+        refreshData();
     </script>
 </body>
 </html>
