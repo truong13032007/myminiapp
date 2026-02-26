@@ -2,93 +2,103 @@
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <title>Signal Pro Dashboard</title>
+    <title>Pro Trading Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        body { background-color: #0b0e11; color: white; font-family: sans-serif; }
-        .card { background: #1e2329; border: 1px solid #2b3139; border-radius: 12px; transition: 0.3s; cursor: pointer; }
+        body { background: #0b0e11; color: #eaecef; }
+        .card { background: #1e2329; border: 1px solid #2b3139; border-radius: 10px; cursor: pointer; transition: 0.2s; }
+        .card:hover { border-color: #f0b90b; }
         .active { border: 2px solid #f0b90b !important; }
-        .LONG { color: #2ebd85; } .SHORT { color: #f6465d; }
+        .LONG { color: #2ebd85; border-bottom: 2px solid #2ebd85; }
+        .SHORT { color: #f6465d; border-bottom: 2px solid #f6465d; }
     </style>
 </head>
 <body class="p-4">
     <div class="max-w-5xl mx-auto">
         <div class="flex justify-between items-center mb-4">
-            <h1 class="text-xl font-black text-yellow-500">PRO SIGNAL SYSTEM</h1>
-            <div id="status" class="text-[10px] px-2 py-1 rounded bg-red-500/20 text-red-500">ĐANG CHỜ API...</div>
+            <h1 class="text-xl font-bold text-yellow-500 tracking-tighter uppercase">Signal Pro Live 2026</h1>
+            <div id="stat" class="text-[10px] px-2 py-1 rounded bg-slate-800">CONNECTING...</div>
         </div>
 
-        <div id="chart-box" class="w-full h-[400px] bg-[#161a1e] rounded-xl border border-slate-800 mb-6 overflow-hidden relative">
-            <div class="absolute top-4 left-4 z-10 bg-black/50 p-2 rounded text-sm font-bold">
-                <span id="curSym">BTC/USDT</span>: <span id="curPrice" class="text-yellow-400">---</span>
+        <div class="bg-[#161a1e] rounded-xl border border-slate-800 p-2 mb-6 relative">
+            <div class="absolute top-4 left-4 z-10 font-bold">
+                <span id="sym">BTC/USDT</span> <span id="pri" class="text-yellow-400 ml-2">---</span>
             </div>
-            <div id="mainChart" class="w-full h-full"></div>
+            <div id="chart" style="height: 400px; width: 100%;"></div>
         </div>
 
         <div id="grid" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
     </div>
 
     <script>
-        const API_URL = "https://myminiapp-oawx.onrender.com";
-        let chart, candleSeries, currentSymbol = "BTC/USDT";
+        const API = "https://myminiapp-oawx.onrender.com";
+        let chart, candleSeries, curSym = "BTC/USDT";
 
-        function initChart() {
-            const container = document.getElementById('mainChart');
-            chart = LightweightCharts.createChart(container, {
+        function setupChart() {
+            const el = document.getElementById('chart');
+            chart = LightweightCharts.createChart(el, {
                 layout: { background: { color: '#161a1e' }, textColor: '#d1d4dc' },
-                grid: { vertLines: { color: '#2b3139' }, horzLines: { color: '#2b3139' } },
+                grid: { vertLines: { color: '#23272d' }, horzLines: { color: '#23272d' } },
             });
             candleSeries = chart.addCandlestickSeries({ upColor: '#2ebd85', downColor: '#f6465d' });
         }
 
-        async function loadChart(symbol) {
-            currentSymbol = symbol;
-            document.getElementById('curSym').innerText = symbol === 'PAXG/USDT' ? 'GOLD (Vàng)' : symbol;
+        async function loadChart(s) {
+            curSym = s;
+            document.getElementById('sym').innerText = s;
             try {
-                const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol.replace('/', '')}&interval=1h&limit=100`);
-                const data = await res.json();
-                const ohlc = data.map(d => ({ time: d[0]/1000, open: d[1], high: d[2], low: d[3], close: d[4] }));
+                const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${s.replace('/','')}&interval=1h&limit=100`);
+                const raw = await r.json();
+                const ohlc = raw.map(x => ({ time: x[0]/1000, open: x[1], high: x[2], low: x[3], close: x[4] }));
                 candleSeries.setData(ohlc);
+
+                // Vẽ tín hiệu nếu có
+                const sigRes = await fetch(`${API}/api/signals`);
+                const sigs = await sigRes.json();
+                const my = sigs.find(x => x.symbol === s);
+                if (my && my.signal !== "WAIT") {
+                    candleSeries.setMarkers([{
+                        time: ohlc[ohlc.length-1].time,
+                        position: my.signal==='LONG'?'belowBar':'aboveBar',
+                        color: my.signal==='LONG'?'#2ebd85':'#f6465d',
+                        shape: my.signal==='LONG'?'arrowUp':'arrowDown',
+                        text: my.signal
+                    }]);
+                } else { candleSeries.setMarkers([]); }
                 chart.timeScale().fitContent();
             } catch (e) {}
         }
 
-        async function fetchData() {
+        async function refresh() {
             try {
-                const res = await fetch(`${API_URL}/api/signals`);
-                if (!res.ok) throw new Error();
-                const data = await res.json();
-                
+                const r = await fetch(`${API}/api/signals`);
+                const data = await r.json();
                 const grid = document.getElementById('grid');
                 grid.innerHTML = '';
-                
                 data.forEach(item => {
-                    if (item.symbol === currentSymbol) {
-                        document.getElementById('curPrice').innerText = item.price;
-                    }
-                    const div = document.createElement('div');
-                    div.className = `card p-4 ${item.signal} ${item.symbol === currentSymbol ? 'active' : ''}`;
-                    div.onclick = () => loadChart(item.symbol);
-                    div.innerHTML = `
-                        <div class="font-bold text-xs">${item.symbol}</div>
-                        <div class="text-xl font-mono my-1">${item.price}</div>
-                        <div class="text-[10px] font-black uppercase">${item.signal} (RSI: ${item.rsi})</div>
+                    if(item.symbol === curSym) document.getElementById('pri').innerText = item.price;
+                    const d = document.createElement('div');
+                    d.className = `card p-4 ${item.signal} ${item.symbol===curSym?'active':''}`;
+                    d.onclick = () => loadChart(item.symbol);
+                    d.innerHTML = `
+                        <div class="text-xs font-bold uppercase">${item.symbol.split('/')[0]}</div>
+                        <div class="text-lg font-mono my-1">${item.price}</div>
+                        <div class="text-[9px] font-black opacity-60 uppercase">${item.signal} RSI:${item.rsi}</div>
                     `;
-                    grid.appendChild(div);
+                    grid.appendChild(d);
                 });
-
-                document.getElementById('status').innerText = "HỆ THỐNG ONLINE ✅";
-                document.getElementById('status').className = "text-[10px] px-2 py-1 rounded bg-green-500/20 text-green-500";
+                document.getElementById('stat').innerText = "LIVE ✅";
+                document.getElementById('stat').className = "text-[10px] px-2 py-1 rounded bg-green-900 text-green-400";
             } catch (e) {
-                document.getElementById('status').innerText = "ĐANG THỬ LẠI KẾT NỐI...";
+                document.getElementById('stat').innerText = "API WAITING...";
             }
         }
 
-        initChart();
+        setupChart();
         loadChart("BTC/USDT");
-        setInterval(fetchData, 5000); // Cập nhật mỗi 5 giây
-        fetchData();
+        setInterval(refresh, 5000);
+        refresh();
     </script>
 </body>
 </html>
