@@ -1,7 +1,6 @@
 import asyncio
 import requests
 import ccxt.async_support as ccxt
-import google.generativeai as genai
 from flask import Flask
 from threading import Thread
 import time
@@ -9,12 +8,6 @@ import time
 # --- CẤU HÌNH ---
 TOKEN = "8732938098:AAGrT0VC6B1mCMKPzdthChMUfGr2dv8tuZ0"
 CHAT_ID = "6317501489"
-GEMINI_KEY = "DÁN_KEY_GEMINI_CỦA_BẠN_VÀO_ĐÂY" 
-
-# Cấu hình Gemini
-genai.configure(api_key=GEMINI_KEY)
-ai_model = genai.GenerativeModel('gemini-1.5-flash')
-
 SYMBOLS = {
     "BTC ₿": "BTC/USDT", "ETH Ξ": "ETH/USDT",
     "SOL ☀️": "SOL/USDT", "VÀNG 🏆": "PAXG/USDT"
@@ -23,108 +16,87 @@ SYMBOLS = {
 app = Flask(__name__)
 KEYBOARD = {"keyboard": [[{"text": "BTC ₿"}, {"text": "ETH Ξ"}], [{"text": "SOL ☀️"}, {"text": "VÀNG 🏆"}]], "resize_keyboard": True}
 
-# --- HÀM PHÂN TÍCH ---
-def calculate_indicators(closes):
+# --- HÀM TÍNH TOÁN (KHÔNG AI - SIÊU NHANH) ---
+def calculate_rsi(closes):
     if len(closes) < 15: return 50
     diff = [closes[i] - closes[i-1] for i in range(1, len(closes))]
     gain = sum([d for d in diff[-14:] if d > 0]) / 14
     loss = sum([-d for d in diff[-14:] if d < 0]) / 14
-    rsi = round(100 - (100 / (1 + (gain/abs(loss)))), 2) if loss != 0 else 100
-    return rsi
+    return round(100 - (100 / (1 + (gain/abs(loss)))), 2) if loss != 0 else 100
 
-async def get_ai_analysis(name, price, rsi):
-    try:
-        prompt = f"Giá {name} hiện tại {price}, RSI {rsi}. Phân tích xu hướng cực ngắn gọn trong 1 câu tiếng Việt."
-        response = await asyncio.to_thread(ai_model.generate_content, prompt)
-        return response.text.strip()
-    except:
-        return "AI đang bận, hãy dựa vào chỉ số RSI."
-
-async def get_signal_message(name, sym):
-    ex = ccxt.okx({'timeout': 10000}) 
+async def get_data(name, sym):
+    ex = ccxt.okx({'timeout': 5000}) # Chỉ đợi sàn 5s, không đợi lâu gây đơ
     try:
         ohlcv = await ex.fetch_ohlcv(sym, timeframe='1h', limit=50)
-        closes = [x[4] for x in ohlcv]
-        curr = closes[-1]
-        rsi = calculate_indicators(closes)
+        curr = ohlcv[-1][4]
+        rsi = calculate_rsi([x[4] for x in ohlcv])
         
-        # Nhận định AI
-        ai_remark = await get_ai_analysis(name, curr, rsi)
-        
-        # Xác định xu hướng
         trend = "ĐI NGANG"
         if rsi > 55: trend = "TĂNG"
         elif rsi < 45: trend = "GIẢM"
         
-        signal_line = ""
-        if rsi <= 32:
-            signal_line = f"\n🚨 **TÍN HIỆU: LONG**\n📍 **ENTRY: {curr}**"
-        elif rsi >= 68:
-            signal_line = f"\n🚨 **TÍN HIỆU: SHORT**\n📍 **ENTRY: {curr}**"
+        signal = ""
+        if rsi <= 32: signal = f"\n🚨 **LỆNH: LONG**\n📍 **ENTRY: {curr}**"
+        elif rsi >= 68: signal = f"\n🚨 **LỆNH: SHORT**\n📍 **ENTRY: {curr}**"
         
         msg = (f"📊 *{name}*\n"
                f"━━━━━━━━━━━━━━━\n"
-               f"💰 Giá: `{curr}`\n"
+               f"💰 Price: `{curr}`\n"
                f"📈 RSI: `{rsi}`\n"
                f"🔍 Xu hướng: *{trend}*\n"
-               f"🤖 AI: _{ai_remark}_\n"
-               f"━━━━━━━━━━━━━━━"
-               f"{signal_line}")
-            
-        return msg, curr, (True if signal_line else False)
-    except Exception as e:
-        print(f"Lỗi fetch: {e}")
+               f"━━━━━━━━━━━━━━━{signal}")
+        return msg, curr, (True if signal else False)
+    except:
         return None, None, False
     finally:
         await ex.close()
 
-# --- LUỒNG XỬ LÝ CHÍNH ---
-async def main_worker():
+# --- VÒNG LẶP CHÍNH (XỬ LÝ NÚT BẤM VÀ QUÉT) ---
+async def main_loop():
     offset = 0
+    last_scan = 0
     last_alerts = {s: 0 for s in SYMBOLS}
-    last_scan_time = 0
-
+    
     while True:
         try:
-            # 1. Xử lý nút bấm (Ưu tiên cao)
+            # 1. Kiểm tra tin nhắn/nút bấm (Timeout ngắn để không chặn luồng)
             url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=5"
             res = requests.get(url, timeout=10).json()
             
             for update in res.get("result", []):
                 offset = update["update_id"] + 1
                 if "message" in update and "text" in update["message"]:
-                    text = update["message"]["text"]
-                    if text in SYMBOLS:
-                        msg, _, _ = await get_signal_message(text, SYMBOLS[text])
+                    cmd = update["message"]["text"]
+                    if cmd in SYMBOLS:
+                        msg, _, _ = await get_data(cmd, SYMBOLS[cmd])
                         if msg:
                             requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                          json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "reply_markup": KEYBOARD})
-                    elif text == "/start":
+                                json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "reply_markup": KEYBOARD})
+                    elif cmd == "/start":
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                      json={"chat_id": CHAT_ID, "text": "Hệ thống AI Trading Online!", "reply_markup": KEYBOARD})
+                            json={"chat_id": CHAT_ID, "text": "Bot đã fix lỗi đơ. Sẵn sàng!", "reply_markup": KEYBOARD})
 
-            # 2. Tự động quét kèo (Mỗi 5 phút một lần để tránh đơ luồng)
-            current_time = time.time()
-            if current_time - last_scan_time > 300:
+            # 2. Tự động quét kèo mỗi 3 phút
+            if time.time() - last_scan > 180:
                 for name, sym in SYMBOLS.items():
-                    msg, curr, has_signal = await get_signal_message(name, sym)
-                    if has_signal and last_alerts[name] != curr:
+                    msg, curr, has_sig = await get_data(name, sym)
+                    if has_sig and last_alerts[name] != curr:
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                      json={"chat_id": CHAT_ID, "text": "🔔 *QUÉT TỰ ĐỘNG*\n" + msg, "parse_mode": "Markdown"})
+                            json={"chat_id": CHAT_ID, "text": "🔔 *BÁO KÈO TỰ ĐỘNG*\n" + msg, "parse_mode": "Markdown"})
                         last_alerts[name] = curr
-                last_scan_time = current_time
+                last_scan = time.time()
 
         except Exception as e:
-            print(f"Lỗi hệ thống: {e}")
-            await asyncio.sleep(5) # Đợi 5s nếu lỗi mạng rồi tự chạy lại
+            print(f"Lỗi: {e}")
+            await asyncio.sleep(5) # Nếu lỗi mạng, nghỉ 5s rồi chạy tiếp
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1) # Nghỉ cực ngắn để CPU không quá tải
 
 @app.route('/')
-def home(): return "Bot is Running", 200
+def home(): return "Bot Online", 200
 
 if __name__ == "__main__":
-    # Chạy Web Server trong luồng riêng
+    # Chạy Web Server để Render không tắt bot
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    # Chạy vòng lặp bot chính
-    asyncio.run(main_worker())
+    # Chạy vòng lặp bot
+    asyncio.run(main_loop())
