@@ -1,12 +1,14 @@
 import asyncio
 import requests
 import ccxt.async_support as ccxt
-from flask import Flask, request
+from flask import Flask
 from threading import Thread
+import time
 
-# --- CẤU HÌNH ---
+# --- CẤU HÌNH BOT ---
 TOKEN = "8732938098:AAGrT0VC6B1mCMKPzdthChMUfGr2dv8tuZ0"
 CHAT_ID = "6317501489"
+# Đổi symbol sang định dạng của OKX (thường là COIN-USDT)
 SYMBOLS = {
     "BTC ₿": "BTC/USDT",
     "ETH Ξ": "ETH/USDT",
@@ -16,17 +18,19 @@ SYMBOLS = {
 
 app = Flask(__name__)
 
-# Menu bàn phím
 KEYBOARD = {
-    "keyboard": [[{"text": "BTC ₿"}, {"text": "ETH Ξ"}], [{"text": "SOL ☀️"}, {"text": "VÀNG 🏆"}]],
+    "keyboard": [
+        [{"text": "BTC ₿"}, {"text": "ETH Ξ"}],
+        [{"text": "SOL ☀️"}, {"text": "VÀNG 🏆"}]
+    ],
     "resize_keyboard": True
 }
 
-def send_msg(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "reply_markup": KEYBOARD})
-
-def send_photo_url(caption, photo_url):
+def send_photo(caption, symbol):
+    # Sử dụng TradingView để lấy ảnh biểu đồ
+    tv_sym = symbol.replace("/", "")
+    photo_url = f"https://api.screenshotmachine.com/?key=bc8945&url=https://www.tradingview.com/chart/?symbol=OKX:{tv_sym}&dimension=1024x768"
+    
     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
     payload = {
         "chat_id": CHAT_ID,
@@ -35,74 +39,72 @@ def send_photo_url(caption, photo_url):
         "parse_mode": "Markdown",
         "reply_markup": KEYBOARD
     }
-    requests.post(url, json=payload)
-
-async def get_signal_and_send(name, symbol):
-    ex = ccxt.binance()
     try:
-        # Lấy dữ liệu nhanh
+        requests.post(url, json=payload, timeout=10)
+    except:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
+                      json={"chat_id": CHAT_ID, "text": caption, "parse_mode": "Markdown"})
+
+async def get_data_and_reply(name, symbol):
+    # DÙNG OKX THAY CHO BINANCE ĐỂ TRÁNH LỖI 451 TRÊN RENDER
+    ex = ccxt.okx() 
+    try:
         ohlcv = await ex.fetch_ohlcv(symbol, timeframe='1h', limit=50)
         closes = [x[4] for x in ohlcv]
         
-        # Tính RSI
         diff = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-        up = sum([d for d in diff[-14:] if d > 0]) / 14
-        down = sum([-d for d in diff[-14:] if d < 0]) / 14
-        rsi = round(100 - (100 / (1 + (up/abs(down)))), 2) if down != 0 else 100
+        gain = sum([d for d in diff[-14:] if d > 0]) / 14
+        loss = sum([-d for d in diff[-14:] if d < 0]) / 14
+        rs = gain / abs(loss) if loss != 0 else 0
+        rsi = round(100 - (100 / (1 + rs)), 2)
         
-        # Xác định tín hiệu
-        sig_text = "⚪ ĐANG CHỜ"
-        icon = ""
-        if rsi <= 35: # Nới lỏng vùng báo để dễ thấy mũi tên
-            sig_text = "🟢 MUA (LONG)"
-            icon = "buy"
+        signal = "⚪ ĐANG CHỜ"
+        arrow = ""
+        if rsi <= 35: 
+            signal = "🟢 *LỆNH: LONG (MUA)*"
+            arrow = "⬆️⬆️⬆️"
         elif rsi >= 65:
-            sig_text = "🔴 BÁN (SHORT)"
-            icon = "sell"
+            signal = "🔴 *LỆNH: SHORT (BÁN)*"
+            arrow = "⬇️⬇️⬇️"
 
-        # LẤY ẢNH TỪ SERVER BIỂU ĐỒ (SIÊU NHANH)
-        # Sử dụng mã symbol chuẩn cho URL ảnh
-        tv_sym = symbol.replace("/", "").upper()
-        # Tạo link ảnh biểu đồ chuyên nghiệp (đã có sẵn nến và RSI)
-        photo_url = f"https://s3.tradingview.com/snapshots/s/sRInIeW6.png" # Link snapshot gốc
-        # Lưu ý: Vì snapshot cần ID cụ thể, ta dùng link thay thế cực nhanh:
-        photo_url = f"https://api.screenshotmachine.com/?key=bc8945&url=https://www.tradingview.com/chart/?symbol=BINANCE:{tv_sym}&dimension=1024x768"
-
-        caption = (f"💎 *{name}* ({symbol})\n"
+        caption = (f"🔔 *TÍN HIỆU {name} (Data: OKX)*\n"
+                   f"━━━━━━━━━━━━━━━\n"
                    f"💰 Giá: `{closes[-1]}`\n"
                    f"📊 RSI: `{rsi}`\n"
-                   f"⚡ Tín hiệu: *{sig_text}*\n"
+                   f"👉 Tín hiệu: {signal}\n"
+                   f"🎯 {arrow}\n"
                    f"━━━━━━━━━━━━━━━\n"
-                   f"{'🚀 ĐẶT LỆNH LONG NGAY' if icon == 'buy' else ('📉 ĐẶT LỆNH SHORT NGAY' if icon == 'sell' else '👉 Theo dõi thêm')}")
+                   f"⏰ Khung: 1 Giờ")
         
-        send_photo_url(caption, photo_url)
+        send_photo(caption, symbol)
     except Exception as e:
-        send_msg(f"Lỗi: {e}")
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
+                      json={"chat_id": CHAT_ID, "text": f"Lỗi hệ thống: {str(e)}", "parse_mode": "Markdown"})
     finally:
         await ex.close()
 
-async def worker():
+async def main_bot():
     offset = 0
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
-            res = requests.get(url, timeout=10).json()
-            for update in res.get("result", []):
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=5"
+            updates = requests.get(url).json()
+            for update in updates.get("result", []):
                 offset = update["update_id"] + 1
                 if "message" in update and "text" in update["message"]:
-                    text = update["message"]["text"]
-                    if text in SYMBOLS:
-                        # Gửi xác nhận tức thì
+                    cmd = update["message"]["text"]
+                    if cmd == "/start":
+                        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
+                                      json={"chat_id": CHAT_ID, "text": "🚀 Đã sửa lỗi kết nối sàn! Chọn coin để lấy kèo:", "reply_markup": KEYBOARD})
+                    elif cmd in SYMBOLS:
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendChatAction", json={"chat_id": CHAT_ID, "action": "upload_photo"})
-                        await get_signal_and_send(text, SYMBOLS[text])
-                    elif text == "/start":
-                        send_msg("👋 Bot đã Online! Chọn Coin để xem kèo có mũi tên:")
+                        await get_data_and_reply(cmd, SYMBOLS[cmd])
         except: pass
         await asyncio.sleep(1)
 
 @app.route('/')
-def home(): return "Bot Running", 200
+def home(): return "Bot Fix 451 Active", 200
 
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    asyncio.run(worker())
+    asyncio.run(main_bot())
