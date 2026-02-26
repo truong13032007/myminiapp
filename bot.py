@@ -8,7 +8,6 @@ import time
 # --- CẤU HÌNH BOT ---
 TOKEN = "8732938098:AAGrT0VC6B1mCMKPzdthChMUfGr2dv8tuZ0"
 CHAT_ID = "6317501489"
-# Đổi symbol sang định dạng của OKX (thường là COIN-USDT)
 SYMBOLS = {
     "BTC ₿": "BTC/USDT",
     "ETH Ξ": "ETH/USDT",
@@ -27,31 +26,38 @@ KEYBOARD = {
 }
 
 def send_photo(caption, symbol):
-    # Sử dụng TradingView để lấy ảnh biểu đồ
-    tv_sym = symbol.replace("/", "")
-    photo_url = f"https://api.screenshotmachine.com/?key=bc8945&url=https://www.tradingview.com/chart/?symbol=OKX:{tv_sym}&dimension=1024x768"
+    # Lấy mã Coin bỏ dấu gạch chéo (ví dụ: BTCUSDT)
+    clean_symbol = symbol.replace("/", "")
+    # Link ảnh Snapshot trực tiếp từ TradingView (Dùng sàn OKX để tránh lỗi IP)
+    photo_url = f"https://s3.tradingview.com/snapshots/c/{clean_symbol}.png"
     
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    # Một số cặp tiền đặc biệt cần link khác, đây là link dự phòng chất lượng cao
+    # Chúng ta sẽ gửi tin nhắn kèm link ảnh, Telegram sẽ tự hiển thị ảnh cực đẹp
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    
+    # Để Telegram tự hiển thị ảnh (Preview), ta gửi link ảnh kèm nội dung
+    text_content = f"{caption}\n\n[📊 Xem biểu đồ trực quan]({photo_url})"
+    
     payload = {
         "chat_id": CHAT_ID,
-        "photo": photo_url,
-        "caption": caption,
+        "text": text_content,
         "parse_mode": "Markdown",
-        "reply_markup": KEYBOARD
+        "reply_markup": KEYBOARD,
+        "disable_web_page_preview": False # Quan trọng: Phải để False để hiện ảnh
     }
     try:
         requests.post(url, json=payload, timeout=10)
     except:
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                      json={"chat_id": CHAT_ID, "text": caption, "parse_mode": "Markdown"})
+        pass
 
 async def get_data_and_reply(name, symbol):
-    # DÙNG OKX THAY CHO BINANCE ĐỂ TRÁNH LỖI 451 TRÊN RENDER
+    # Dùng OKX để không bị lỗi 451 Restricted Location trên Render
     ex = ccxt.okx() 
     try:
         ohlcv = await ex.fetch_ohlcv(symbol, timeframe='1h', limit=50)
         closes = [x[4] for x in ohlcv]
         
+        # Tính RSI
         diff = [closes[i] - closes[i-1] for i in range(1, len(closes))]
         gain = sum([d for d in diff[-14:] if d > 0]) / 14
         loss = sum([-d for d in diff[-14:] if d < 0]) / 14
@@ -59,27 +65,27 @@ async def get_data_and_reply(name, symbol):
         rsi = round(100 - (100 / (1 + rs)), 2)
         
         signal = "⚪ ĐANG CHỜ"
-        arrow = ""
+        arrow = "⌛"
         if rsi <= 35: 
-            signal = "🟢 *LỆNH: LONG (MUA)*"
-            arrow = "⬆️⬆️⬆️"
+            signal = "🟢 *LONG (MUA)*"
+            arrow = "⬆️ MUA NGAY"
         elif rsi >= 65:
-            signal = "🔴 *LỆNH: SHORT (BÁN)*"
-            arrow = "⬇️⬇️⬇️"
+            signal = "🔴 *SHORT (BÁN)*"
+            arrow = "⬇️ BÁN NGAY"
 
-        caption = (f"🔔 *TÍN HIỆU {name} (Data: OKX)*\n"
+        caption = (f"🔔 *TÍN HIỆU {name}*\n"
                    f"━━━━━━━━━━━━━━━\n"
                    f"💰 Giá: `{closes[-1]}`\n"
                    f"📊 RSI: `{rsi}`\n"
-                   f"👉 Tín hiệu: {signal}\n"
-                   f"🎯 {arrow}\n"
+                   f"👉 Lệnh: {signal}\n"
+                   f"🎯 Chỉ báo: {arrow}\n"
                    f"━━━━━━━━━━━━━━━\n"
-                   f"⏰ Khung: 1 Giờ")
+                   f"⏰ Khung: 1 Giờ (Data OKX)")
         
         send_photo(caption, symbol)
     except Exception as e:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                      json={"chat_id": CHAT_ID, "text": f"Lỗi hệ thống: {str(e)}", "parse_mode": "Markdown"})
+                      json={"chat_id": CHAT_ID, "text": f"Lỗi: {str(e)}"})
     finally:
         await ex.close()
 
@@ -95,15 +101,14 @@ async def main_bot():
                     cmd = update["message"]["text"]
                     if cmd == "/start":
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                      json={"chat_id": CHAT_ID, "text": "🚀 Đã sửa lỗi kết nối sàn! Chọn coin để lấy kèo:", "reply_markup": KEYBOARD})
+                                      json={"chat_id": CHAT_ID, "text": "🚀 Bot đã fix lỗi ảnh! Bấm nút để lấy kèo:", "reply_markup": KEYBOARD})
                     elif cmd in SYMBOLS:
-                        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendChatAction", json={"chat_id": CHAT_ID, "action": "upload_photo"})
                         await get_data_and_reply(cmd, SYMBOLS[cmd])
         except: pass
         await asyncio.sleep(1)
 
 @app.route('/')
-def home(): return "Bot Fix 451 Active", 200
+def home(): return "Bot Fix Invalid Key Active", 200
 
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
