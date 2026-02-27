@@ -1,8 +1,6 @@
 import asyncio
 import requests
 import ccxt.async_support as ccxt
-import pandas as pd
-import numpy as np
 from flask import Flask
 from threading import Thread
 import time
@@ -18,116 +16,99 @@ SYMBOLS = {
 app = Flask(__name__)
 KEYBOARD = {"keyboard": [[{"text": "BTC ₿"}, {"text": "ETH Ξ"}], [{"text": "SOL ☀️"}, {"text": "VÀNG 🏆"}]], "resize_keyboard": True}
 
-# --- HÀM TÍNH TOÁN LOGIC TRADING ---
-def calculate_complex_logic(df):
-    # 1. RSI
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / loss.abs())))
-    
-    # 2. EMA 50 & 200
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-    
-    # 3. Bollinger Bands
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    df['std'] = df['close'].rolling(window=20).std()
-    df['upper'] = df['ma20'] + (df['std'] * 2)
-    df['lower'] = df['ma20'] - (df['std'] * 2)
-    
-    # 4. ATR (Độ biến động để đặt SL/TP)
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    df['atr'] = ranges.max(axis=1).rolling(window=14).mean()
-    
-    # 5. Phân tích nến & Volume
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    verdict = "CHỜ TÍN HIỆU"
-    strength = 0 # Thang điểm 0-100
-    
-    # --- LOGIC VÀO LỆNH LONG ---
-    # Điều kiện: RSI thấp + Thủng BB Lower + Nằm trên EMA200 + Volume giảm dần (cạn bán)
-    if last['rsi'] < 35 and last['close'] < last['lower']:
-        strength = 50
-        if last['close'] > last['ema200']: strength += 30 # Thuận xu hướng lớn
-        if last['vol'] < df['vol'].tail(5).mean(): strength += 20 # Cạn lực xả
-        verdict = "LONG (MUA)" if strength >= 70 else "THEO DÕI LONG"
+# --- HÀM TÍNH TOÁN KỸ THUẬT THUẦN (CHỐNG LỖI) ---
+def calculate_indicators(closes):
+    # RSI 14
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas[-14:]]
+    losses = [-d if d < 0 else 0 for d in deltas[-14:]]
+    avg_gain = sum(gains) / 14
+    avg_loss = sum(losses) / 14
+    rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss != 0 else 100
 
-    # --- LOGIC VÀO LỆNH SHORT ---
-    elif last['rsi'] > 65 and last['close'] > last['upper']:
-        strength = 50
-        if last['close'] < last['ema200']: strength += 30 # Thuận xu hướng giảm
-        if last['vol'] > df['vol'].tail(5).mean(): strength += 20 # Có lực xả mạnh
-        verdict = "SHORT (BÁN)" if strength >= 70 else "THEO DÕI SHORT"
+    # SMA 20 & Bollinger Bands
+    sma20 = sum(closes[-20:]) / 20
+    variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20
+    std_dev = variance ** 0.5
+    upper, lower = sma20 + (std_dev * 2), sma20 - (std_dev * 2)
 
-    return {
-        "price": round(last['close'], 2),
-        "rsi": round(last['rsi'], 1),
-        "ema_status": "BULLISH" if last['ema50'] > last['ema200'] else "BEARISH",
-        "verdict": verdict,
-        "strength": strength,
-        "tp": round(last['close'] + (last['atr'] * 2) if "LONG" in verdict else last['close'] - (last['atr'] * 2), 2),
-        "sl": round(last['close'] - (last['atr'] * 1.5) if "LONG" in verdict else last['close'] + (last['atr'] * 1.5), 2)
-    }
+    # EMA 200 (Ước tính nhanh)
+    ema200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else sum(closes) / len(closes)
 
-async def process_market(name, sym, is_auto=False):
+    return round(rsi, 2), round(upper, 2), round(lower, 2), round(ema200, 2)
+
+async def get_market_signal(name, sym, is_auto=False):
     ex = ccxt.okx({'timeout': 5000})
     try:
-        bars = await ex.fetch_ohlcv(sym, timeframe='1h', limit=250)
-        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        res = calculate_complex_logic(df)
+        ohlcv = await ex.fetch_ohlcv(sym, timeframe='1h', limit=250)
+        closes = [x[4] for x in ohlcv]
+        curr = closes[-1]
+        rsi, upper, lower, ema200 = calculate_indicators(closes)
 
-        if is_auto and res['strength'] < 80: return # Chỉ báo tự động kèo cực ngon
+        # LOGIC ĐA TẦNG
+        verdict = "CHỜ TÍN HIỆU"
+        score = 0
+        
+        if rsi < 32 and curr <= lower:
+            score = 70
+            if curr > ema200: score += 20 # Thuận xu hướng tăng
+            verdict = "LONG (MUA)"
+        elif rsi > 68 and curr >= upper:
+            score = 70
+            if curr < ema200: score += 20 # Thuận xu hướng giảm
+            verdict = "SHORT (BÁN)"
 
-        msg = (f"🛡 *PHẦN MỀM TRADING PRO: {name}*\n"
+        if is_auto and score < 90: return # Chỉ tự động báo kèo cực thơm
+
+        sl = round(curr * (0.985 if "LONG" in verdict else 1.015), 2)
+        tp = round(curr * (1.03 if "LONG" in verdict else 0.97), 2)
+
+        msg = (f"🛡 *CHIẾN THUẬT ĐA TẦNG: {name}*\n"
                f"━━━━━━━━━━━━━━━\n"
-               f"💰 Giá: `{res['price']}` | RSI: `{res['rsi']}`\n"
-               f"📈 Xu hướng: *{res['ema_status']}*\n"
-               f"📊 Độ tin cậy: `{res['strength']}%`\n"
+               f"💰 Giá: `{curr}` | RSI: `{rsi}`\n"
+               f"📊 Xu hướng: `{'TĂNG' if curr > ema200 else 'GIẢM'}`\n"
+               f"💠 BB: `{lower} - {upper}`\n"
                f"━━━━━━━━━━━━━━━\n"
-               f"📢 **LỆNH: {res['verdict']}**\n"
-               f"🎯 TP (Mục tiêu): `{res['tp']}`\n"
-               f"🛑 SL (Cắt lỗ): `{res['sl']}`\n"
-               f"💡 *Lời khuyên: {'Quản lý vốn 2%' if res['strength'] > 70 else 'Đứng ngoài quan sát'}*")
+               f"📢 **LỆNH: {verdict}**\n"
+               f"🎯 TP: `{tp}` | 🛑 SL: `{sl}`\n"
+               f"⭐ Độ tin cậy: `{score}%`")
         
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
                       json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "reply_markup": KEYBOARD})
-    except: pass
-    finally: await ex.close()
+    except Exception as e:
+        print(f"Lỗi fetch: {e}")
+    finally:
+        await ex.close()
 
-# --- VÒNG LẶP CHỐNG ĐƠ ---
-async def main_loop():
+# --- LUỒNG XỬ LÝ CHÍNH ---
+async def main_worker():
     offset = 0
     last_scan = 0
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=5"
-            res = requests.get(url, timeout=10).json()
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
+            res = requests.get(url, timeout=15).json()
             for update in res.get("result", []):
                 offset = update["update_id"] + 1
                 if "message" in update and "text" in update["message"]:
-                    cmd = update["message"]["text"]
-                    if cmd in SYMBOLS:
-                        await process_market(cmd, SYMBOLS[cmd])
-                    elif cmd == "/start":
+                    text = update["message"]["text"]
+                    if text in SYMBOLS:
+                        await get_market_signal(text, SYMBOLS[text])
+                    elif text == "/start":
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                            json={"chat_id": CHAT_ID, "text": "Hệ thống Trading Đa Tầng đã sẵn sàng!", "reply_markup": KEYBOARD})
-            
-            if time.time() - last_scan > 600: # 10 phút quét 1 lần
+                                      json={"chat_id": CHAT_ID, "text": "✅ Hệ thống Trading Logic đã kết nối!", "reply_markup": KEYBOARD})
+
+            if time.time() - last_scan > 600:
                 for name, sym in SYMBOLS.items():
-                    await process_market(name, sym, is_auto=True)
+                    await get_market_signal(name, sym, is_auto=True)
                 last_scan = time.time()
-        except: await asyncio.sleep(5)
+        except:
+            await asyncio.sleep(5)
         await asyncio.sleep(0.5)
 
 @app.route('/')
-def home(): return "Pro Logic Active", 200
+def home(): return "Bot is Running", 200
 
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    asyncio.run(main_loop())
+    asyncio.run(main_worker())
