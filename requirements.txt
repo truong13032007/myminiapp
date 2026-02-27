@@ -3,4 +3,3 @@ requests
 flask
 google-generativeai
 pandas
-pandas_ta
