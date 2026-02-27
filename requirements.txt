@@ -2,3 +2,4 @@ ccxt
 requests
 flask
 google-generativeai
+pandas
