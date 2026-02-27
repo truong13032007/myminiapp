@@ -3,6 +3,7 @@ import requests
 import ccxt.async_support as ccxt
 import google.generativeai as genai
 import pandas as pd
+import pandas_ta as ta
 from flask import Flask
 from threading import Thread
 import time
@@ -23,138 +24,97 @@ SYMBOLS = {
 app = Flask(__name__)
 KEYBOARD = {"keyboard": [[{"text": "BTC ₿"}, {"text": "ETH Ξ"}], [{"text": "SOL ☀️"}, {"text": "VÀNG 🏆"}]], "resize_keyboard": True}
 
-# --- HÀM XỬ LÝ DỮ LIỆU KỸ THUẬT ---
-def get_analysis_indicators(df):
-    # Tính RSI
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    # Tính Bollinger Bands
-    df['sma20'] = df['close'].rolling(window=20).mean()
-    df['std'] = df['close'].rolling(window=20).std()
-    df['upper'] = df['sma20'] + (df['std'] * 2)
-    df['lower'] = df['sma20'] - (df['std'] * 2)
-    
-    # Tính biến động nến (Volatility)
-    df['body_size'] = abs(df['close'] - df['open'])
-    df['avg_body'] = df['body_size'].rolling(window=10).mean()
-    
-    return df
-
-async def fetch_full_data(sym):
+# --- HÀM PHÂN TÍCH CHUYÊN SÂU ---
+async def fetch_and_analyze(sym, is_auto=False):
     ex = ccxt.okx({'timeout': 10000})
     try:
-        # Lấy dữ liệu 2 khung thời gian
-        h1_data = await ex.fetch_ohlcv(sym, timeframe='1h', limit=50)
-        m15_data = await ex.fetch_ohlcv(sym, timeframe='15m', limit=50)
+        bars = await ex.fetch_ohlcv(sym, timeframe='1h', limit=100)
+        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         
-        df_h1 = pd.DataFrame(h1_data, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df_m15 = pd.DataFrame(m15_data, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        # Chỉ báo kỹ thuật
+        df['RSI'] = ta.rsi(df['close'], length=14)
+        bbands = ta.bbands(df['close'], length=20, std=2)
+        df = pd.concat([df, bbands], axis=1)
         
-        df_h1 = get_analysis_indicators(df_h1)
-        df_m15 = get_analysis_indicators(df_m15)
+        last = df.iloc[-1]
         
-        return df_h1.iloc[-1], df_m15.iloc[-1], df_h1['close'].tail(15).tolist()
+        # Nếu là tự động quét, chỉ báo kèo khi thực sự ngon (RSI < 30 hoặc > 70)
+        if is_auto:
+            if not (last['RSI'] <= 30 or last['RSI'] >= 70):
+                return None, None
+        
+        # Gọi AI soi kèo
+        prompt = f"""
+        Bạn là Chuyên gia Trading. Cặp {sym} giá {last['close']}, RSI {round(last['RSI'],1)}.
+        BB: {round(last['BBL_20_2.0'],2)} - {round(last['BBU_20_2.0'],2)}.
+        Nhiệm vụ: Phân tích nến và phán đoán dứt khoát: LONG, SHORT hoặc ĐỨNG NGOÀI.
+        Yêu cầu có: Entry, TP, SL rõ ràng. Trả lời tiếng Việt súc tích.
+        """
+        response = await asyncio.to_thread(ai_model.generate_content, prompt)
+        return last, response.text.strip()
+    except:
+        return None, None
     finally:
         await ex.close()
 
-# --- SIÊU TRÍ TUỆ AI PHÂN TÍCH ---
-async def ai_expert_review(name, h1, m15, history):
-    try:
-        # Phân tích nến cuối: Có phải nến xả mạnh (Marubozu) hay nến rút râu (Pinbar)
-        is_dumping = h1['body_size'] > (h1['avg_body'] * 1.5) and h1['close'] < h1['open']
-        
-        prompt = f"""
-        Bạn là một Quản lý Quỹ Hedge Fund chuyên đánh Scalping. 
-        Dữ liệu {name}:
-        - Khung 1H: Giá {h1['close']}, RSI {round(h1['rsi'], 1)}, BB {round(h1['lower'], 2)}-{round(h1['upper'], 2)}.
-        - Khung 15m: RSI {round(m15['rsi'], 1)}.
-        - Lịch sử 15 nến: {history}.
-        - Trạng thái nến hiện tại: {'Xả mạnh (Rủi ro cao)' if is_dumping else 'Bình thường'}.
-
-        YÊU CẦU PHÂN TÍCH:
-        1. Xu hướng cấu trúc: (Ví dụ: Dow tăng, nhưng 15m đang điều chỉnh).
-        2. Soi kèo: Nếu RSI thấp nhưng nến đang 'Xả mạnh' thân dài, tuyệt đối cảnh báo ĐỨNG NGOÀI. Chỉ MUA khi giá chạm BB Lower và có dấu hiệu chững lại.
-        3. Phán đoán: Entry cụ thể, TP (Chốt lời), SL (Cắt lỗ bắt buộc).
-        Trả lời bằng tiếng Việt, giọng chuyên gia, không lý thuyết suông.
-        """
-        response = await asyncio.to_thread(ai_model.generate_content, prompt)
-        return response.text.strip()
-    except:
-        return "⚠️ Hệ thống AI đang quét cấu trúc thị trường, vui lòng đợi..."
-
-async def get_report(name, sym):
-    try:
-        h1, m15, history = await fetch_full_data(sym)
-        ai_msg = await ai_expert_review(name, h1, m15, history)
-        
-        # Tín hiệu lọc cực gắt
-        signal = ""
-        if h1['rsi'] <= 28 and h1['close'] <= h1['lower']:
-            signal = "💎 CƠ HỘI LONG CHIẾN LƯỢC"
-        elif h1['rsi'] >= 72 and h1['close'] >= h1['upper']:
-            signal = "💀 CƠ HỘI SHORT CHIẾN LƯỢC"
-
-        msg = (f"🚀 *HỆ THỐNG PHÂN TÍCH CHUYÊN SÂU: {name}*\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"💰 Giá: `{h1['close']}` | RSI 1H: `{round(h1['rsi'],1)}`\n"
-               f"⏱ RSI 15m: `{round(m15['rsi'],1)}`\n"
-               f"📊 *PHÂN TÍCH TỪ AI:* \n{ai_msg}\n"
-               f"━━━━━━━━━━━━━━━━━━")
-        
-        if signal:
-            msg += f"\n🔥 **{signal}**\n📍 **Mức giá hiện tại: {h1['close']}**"
-        return msg, h1['close'], (True if signal else False)
-    except Exception as e:
-        print(f"Error: {e}")
-        return None, None, False
-
-# --- QUẢN LÝ LUỒNG VÀ WEB SERVER ---
-async def main_worker():
-    offset = 0
-    last_scan = 0
+# --- LUỒNG TỰ ĐỘNG QUÉT KÈO (10 PHÚT/LẦN) ---
+async def auto_scanner():
     last_alerts = {s: 0 for s in SYMBOLS}
-    
     while True:
         try:
-            # Check Telegram Update
+            for name, sym in SYMBOLS.items():
+                data, ai_msg = await fetch_and_analyze(sym, is_auto=True)
+                # Nếu có tín hiệu đẹp và giá đã thay đổi so với lần báo trước
+                if data is not None and last_alerts[name] != data['close']:
+                    msg = (f"🔔 *BÁO KÈO TỰ ĐỘNG: {name}*\n"
+                           f"━━━━━━━━━━━━━━━\n"
+                           f"💰 Giá: `{data['close']}` | RSI: `{round(data['RSI'],1)}`\n"
+                           f"📝 *AI PHÁN ĐOÁN:* \n_{ai_msg}_\n")
+                    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
+                                  json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                    last_alerts[name] = data['close']
+            await asyncio.sleep(600) # Nghỉ 10 phút
+        except:
+            await asyncio.sleep(10)
+
+# --- LUỒNG XỬ LÝ NÚT BẤM ---
+async def button_handler():
+    offset = 0
+    while True:
+        try:
             url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
             res = requests.get(url, timeout=15).json()
             for update in res.get("result", []):
                 offset = update["update_id"] + 1
                 if "message" in update and "text" in update["message"]:
-                    cmd = update["message"]["text"]
-                    if cmd in SYMBOLS:
-                        # Gửi tin nhắn "Đang phân tích" để user không tưởng bot đơ
+                    text = update["message"]["text"]
+                    if text in SYMBOLS:
+                        # Phản hồi ngay lập tức để tránh cảm giác đơ
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                      json={"chat_id": CHAT_ID, "text": f"🔄 AI đang soi kèo {cmd}, chờ xíu..."})
-                        msg, _, _ = await get_report(cmd, SYMBOLS[cmd])
-                        if msg:
+                                      json={"chat_id": CHAT_ID, "text": f"⏳ Đang soi kèo {text} cho bạn..."})
+                        
+                        data, ai_msg = await fetch_and_analyze(SYMBOLS[text], is_auto=False)
+                        if data is not None:
+                            msg = (f"🏛 *CHUYÊN GIA SOI KÈO: {text}*\n"
+                                   f"━━━━━━━━━━━━━━━\n"
+                                   f"💰 Giá: `{data['close']}` | RSI: `{round(data['RSI'],1)}`\n\n"
+                                   f"👨‍🏫 *NHẬN ĐỊNH:* \n_{ai_msg}_\n"
+                                   f"━━━━━━━━━━━━━━━")
                             requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
                                           json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "reply_markup": KEYBOARD})
-                    elif cmd == "/start":
+                    elif text == "/start":
                         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                      json={"chat_id": CHAT_ID, "text": "Hệ thống Super AI Pro Online!", "reply_markup": KEYBOARD})
-
-            # Tự động quét kèo mỗi 15 phút (Khung dài hơn để lọc nhiễu)
-            if time.time() - last_scan > 900:
-                for name, sym in SYMBOLS.items():
-                    msg, curr, has_sig = await get_report(name, sym)
-                    if has_sig and last_alerts[name] != curr:
-                        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                      json={"chat_id": CHAT_ID, "text": "🚨 *PHÁT HIỆN KÈO CHUYÊN GIA*\n" + msg, "parse_mode": "Markdown"})
-                        last_alerts[name] = curr
-                last_scan = time.time()
+                                      json={"chat_id": CHAT_ID, "text": "Hệ thống Trading Pro đã Online!", "reply_markup": KEYBOARD})
         except:
-            await asyncio.sleep(5)
-        await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
 
 @app.route('/')
-def home(): return "Super AI Active", 200
+def home(): return "Bot Online", 200
 
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
-    asyncio.run(main_worker())
+    # Chạy song song cả 2 luồng: Quét tự động và Trả lời nút bấm
+    loop = asyncio.get_event_loop()
+    loop.create_task(auto_scanner())
+    loop.create_task(button_handler())
+    loop.run_forever()
